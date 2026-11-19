@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8fa">
+  <meta name="color-scheme" content="light dark">
+  <title data-i18n="page.title">CareAnywhere AI — Your AI Medical Assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+</head>
+<body>
+  <main class="app" id="app">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="CareAnywhere AI home" data-i18n-aria-label="brand.home">
+        <span class="brand-mark" aria-hidden="true">✚</span>
+        <span class="brand-copy">
+          <strong>CareAnywhere <span>AI</span></strong>
+          <small data-i18n="brand.subtitle">Your AI Medical Assistant</small>
+        </span>
+      </a>
+
+      <nav class="main-nav" aria-label="Main sections" data-i18n-aria-label="nav.label">
+        <button id="chatNav" class="nav-tab active" type="button" aria-current="page" data-i18n="nav.assistant">Assistant</button>
+        <button id="finderNav" class="nav-tab" type="button" data-i18n="nav.finder">Nearby Healthcare</button>
+      </nav>
+
+      <div class="top-actions">
+        <button id="newChat" class="icon-button new-chat" type="button" title="Start a new chat" aria-label="Start a new chat" data-i18n-title="chat.newTitle" data-i18n-aria-label="chat.newTitle">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          <span data-i18n="chat.new">New chat</span>
+        </button>
+        <button id="languageToggle" class="icon-button language-toggle" type="button" aria-label="Switch language to Bangla" title="Switch language to Bangla">বাংলা</button>
+        <button id="themeToggle" class="icon-button theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode">
+          <span class="theme-icon" aria-hidden="true">☾</span>
+        </button>
+        <span id="status" class="status" role="status" aria-live="polite" title="Checking connection"><i></i><span data-i18n="status.checking">Checking connection</span></span>
+      </div>
+    </header>
+
+    <section id="messages" aria-live="polite" aria-label="Conversation" data-i18n-aria-label="chat.conversation">
+      <div class="welcome" id="welcome">
+        <div class="welcome-mark" aria-hidden="true">✚</div>
+        <h1 data-i18n="welcome.title">Hello! How can I help you today?</h1>
+        <p data-i18n="welcome.description">Ask medical questions and get educational guidance backed by trusted sources.</p>
+        <div class="suggestions" aria-label="Suggested questions" data-i18n-aria-label="welcome.suggestions">
+          <button class="suggestion" type="button" data-i18n="welcome.questionHeadache">How can I manage a headache?</button>
+          <button class="suggestion" type="button" data-i18n="welcome.questionAllergy">What are the symptoms of seasonal allergies?</button>
+          <button class="suggestion" type="button" data-i18n="welcome.questionMedicine">How do I read a medicine label?</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="finder" class="finder" aria-labelledby="finderTitle" hidden>
+      <div class="finder-heading">
+        <div>
+          <h1 id="finderTitle" data-i18n="finder.title">Find Nearby Healthcare</h1>
+          <p data-i18n="finder.description">Explore hospitals, clinics, pharmacies and doctors around a location you choose.</p>
+        </div>
+      </div>
+
+      <div class="finder-toolbar">
+        <button id="searchNearMe" class="location-button" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></svg>
+          <span data-i18n="finder.searchNearMe">Search near me</span>
+        </button>
+        <label class="radius-control" for="searchRadius"><span data-i18n="finder.radius">Radius</span>
+          <select id="searchRadius">
+            <option value="1000" data-i18n="finder.radius1">1 km</option>
+            <option value="3000" selected data-i18n="finder.radius3">3 km</option>
+            <option value="5000" data-i18n="finder.radius5">5 km</option>
+            <option value="10000" data-i18n="finder.radius10">10 km</option>
+          </select>
+        </label>
+        <details class="manual-location" id="manualLocation">
+          <summary data-i18n="finder.manualLocation">Enter coordinates manually</summary>
+          <form id="manualSearch" class="manual-form">
+            <label><span data-i18n="finder.latitude">Latitude</span><input id="manualLat" type="number" min="-90" max="90" step="any" placeholder="e.g. 23.8103" data-i18n-placeholder="finder.latitudeExample" required></label>
+            <label><span data-i18n="finder.longitude">Longitude</span><input id="manualLon" type="number" min="-180" max="180" step="any" placeholder="e.g. 90.4125" data-i18n-placeholder="finder.longitudeExample" required></label>
+            <button class="small-button" type="submit" data-i18n="finder.searchLocation">Search this location</button>
+          </form>
+        </details>
+      </div>
+
+      <div class="category-filters" role="group" aria-label="Filter healthcare facilities" data-i18n-aria-label="finder.filters">
+        <button class="category-filter active" type="button" data-category="all" aria-pressed="true" data-i18n="category.all">All</button>
+        <button class="category-filter" type="button" data-category="hospital" aria-pressed="false" data-i18n="category.hospitalPlural">Hospitals</button>
+        <button class="category-filter" type="button" data-category="clinic" aria-pressed="false" data-i18n="category.clinicPlural">Clinics</button>
+        <button class="category-filter" type="button" data-category="pharmacy" aria-pressed="false" data-i18n="category.pharmacyPlural">Pharmacies</button>
+        <button class="category-filter" type="button" data-category="doctors" aria-pressed="false" data-i18n="category.doctors">Doctors</button>
+      </div>
+
+      <div class="finder-message" id="finderMessage" role="status" aria-live="polite" data-i18n="finder.initialMessage">Choose “Search near me” or enter coordinates to search.</div>
+
+      <div class="results-layout">
+        <div class="map-column">
+          <div id="map" class="map" role="region" aria-label="Map of nearby healthcare facilities" data-i18n-aria-label="finder.mapLabel"></div>
+          <div class="map-legend" aria-label="Map marker legend" data-i18n-aria-label="finder.mapLegend">
+            <span><i class="legend-dot user-dot"></i><span data-i18n="finder.yourLocation">Your location</span></span>
+            <span><i class="legend-dot hospital-dot"></i><span data-i18n="category.hospital">Hospital</span></span>
+            <span><i class="legend-dot clinic-dot"></i><span data-i18n="finder.clinicDoctor">Clinic / doctor</span></span>
+            <span><i class="legend-dot pharmacy-dot"></i><span data-i18n="category.pharmacy">Pharmacy</span></span>
+          </div>
+        </div>
+        <aside class="facility-panel" aria-label="Healthcare search results" data-i18n-aria-label="finder.resultsLabel">
+          <div class="results-heading">
+            <h2 data-i18n="finder.nearbyPlaces">Nearby places</h2>
+            <span id="resultCount" class="result-count"></span>
+          </div>
+          <ol id="facilityList" class="facility-list"></ol>
+        </aside>
+      </div>
+
+      <p class="location-privacy" data-i18n="finder.privacy">Your coordinates are used for this nearby lookup, not sent to the AI chat. Map tiles load from OpenStreetMap; opening directions shares both locations with OpenStreetMap.</p>
+    </section>
+
+    <div id="preview" class="preview" hidden>
+      <img id="thumbnail" alt="Selected image preview" data-i18n-alt="image.preview">
+      <span class="preview-name" data-i18n="image.attached">Image attached</span>
+      <button id="remove" class="remove-button" type="button" data-i18n="image.remove">Remove</button>
+    </div>
+
+    <video id="video" autoplay playsinline hidden></video>
+    <div id="cameraActions" class="camera-actions" hidden>
+      <button id="snap" class="small-button" type="button" data-i18n="camera.capture">Capture photo</button>
+      <button id="closeCamera" class="small-button" type="button" data-i18n="camera.close">Close camera</button>
+    </div>
+
+    <form id="chatForm" class="composer-wrap">
+      <div class="composer">
+        <textarea id="message" placeholder="Describe your symptoms or ask a question..." rows="1" required maxlength="4000" aria-label="Your medical question" data-i18n-placeholder="chat.placeholder" data-i18n-aria-label="chat.inputLabel"></textarea>
+        <div class="composer-bottom">
+          <div class="composer-actions">
+            <label class="tool-button" for="image" title="Upload an image" role="button" tabindex="0" aria-label="Upload an image" data-i18n-title="tools.imageTitle" data-i18n-aria-label="tools.imageTitle">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5 7 10a4 4 0 0 0 6 6l6-6a3 3 0 0 0-4-4l-6 6a2 2 0 0 0 3 3l5-5"/></svg><span data-i18n="tools.image">Image</span>
+            </label>
+            <input id="image" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+            <button class="tool-button" id="camera" type="button" title="Use camera" data-i18n-title="camera.use">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h3l2-2h6l2 2h3v12H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span data-i18n="tools.camera">Camera</span>
+            </button>
+            <button class="tool-button" id="mic" type="button" aria-pressed="false" title="Record voice input" data-i18n-title="tools.voiceTitle">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8"/></svg><span data-i18n="tools.voice">Voice</span>
+            </button>
+            <button class="tool-button listen-button" id="listen" type="button" title="Read the latest answer aloud" data-i18n-title="tools.listenTitle">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6l-5 4zM17 9a5 5 0 0 1 0 6m2-9a9 9 0 0 1 0 12"/></svg><span data-i18n="tools.listen">Listen</span>
+            </button>
+          </div>
+          <div class="composer-end">
+            <span id="charCount" class="char-count" aria-live="polite">0 / 4000</span>
+            <button id="send" class="send-button" type="submit" aria-label="Send message" title="Send message" data-i18n-aria-label="chat.send" data-i18n-title="chat.send">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <p class="disclaimer" data-i18n="chat.disclaimer">Educational guidance only — not a diagnosis. For severe symptoms, contact emergency services.</p>
+    </form>
+
+    <details class="api-access">
+      <summary data-i18n="api.title">API access (optional)</summary>
+      <input id="token" type="password" placeholder="API_TOKEN from .env" data-i18n-placeholder="api.tokenPlaceholder" autocomplete="off">
+    </details>
+
+    <canvas id="canvas" hidden></canvas>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="/static/translations.js?v=bn-toggle-2"></script>
+  <script src="/static/app.js?v=bn-toggle-2"></script>
+</body>
+</html>

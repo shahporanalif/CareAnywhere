@@ -135,6 +135,7 @@ celerybeat.pid
 
 # Redis
 *.rdb
+data/osm-healthcare-cache.sqlite3
 *.aof
 *.pid
 
@@ -218,3 +219,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# CareAnywhere OSM extract and local database
+data/osm-healthcare-cache.sqlite3
+data/osm-healthcare-cache.sqlite3-*
+data/*.osm.pbf
+
+# CareAnywhere local databases and sensitive files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+project/
