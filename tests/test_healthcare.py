@@ -89,6 +89,8 @@ class HealthcareFinderTests(unittest.IsolatedAsyncioTestCase):
             "is_stale": False,
             "stale": False,
             "last_updated": "2026-11-17T00:00:00Z",
+            "local_database_available": True,
+            "local_match_count": 0,
         })
 
     async def test_endpoint_marks_stale_results_explicitly(self):
@@ -116,9 +118,9 @@ class HealthcareFinderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls, 2)
         self.assertEqual(len(set(client.endpoints)), client.calls)
 
-    async def test_http_502_and_429_fail_over_to_next_provider(self):
+    async def test_retryable_provider_statuses_fail_over_to_next_provider(self):
         facility = {"type": "node", "id": 8, "lat": 23.78, "lon": 90.41, "tags": {"amenity": "clinic"}}
-        for status_code in (502, 429):
+        for status_code in (500, 502, 429):
             with self.subTest(status=status_code), tempfile.TemporaryDirectory() as temp_dir:
                 self.setUp()
                 client = FakeClient([FakeResponse(status_code=status_code), FakeResponse({"elements": [facility]})])
@@ -128,8 +130,8 @@ class HealthcareFinderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result[:3], ([facility], "fresh", "overpass"))
                 self.assertEqual(client.calls, 2)
 
-    async def test_all_502_or_429_responses_return_service_unavailable(self):
-        for status_code in (502, 429):
+    async def test_all_retryable_provider_statuses_return_service_unavailable(self):
+        for status_code in (429, 500, 502, 503, 504):
             with self.subTest(status=status_code), tempfile.TemporaryDirectory() as temp_dir:
                 self.setUp()
                 client = FakeClient([FakeResponse(status_code=status_code) for _ in range(healthcare.MAX_PROVIDER_ATTEMPTS)])
@@ -184,6 +186,32 @@ class HealthcareFinderTests(unittest.IsolatedAsyncioTestCase):
             result = await healthcare._fetch_elements(23.78, 90.41, 1000, "pharmacy")
         self.assertEqual(result, ([facility], "stale", "persistent_overpass_cache", "2026-11-16T00:00:00Z"))
 
+    async def test_failed_empty_provider_response_does_not_replace_stale_facilities(self):
+        previous_facility = {
+            "type": "node", "id": 201, "lat": 23.78, "lon": 90.41,
+            "tags": {"amenity": "hospital", "name": "Cached Hospital"},
+        }
+        failed_response = FakeResponse({
+            "elements": [], "remark": "runtime error: Query timed out while loading data.",
+        })
+        client = FakeClient([failed_response for _ in range(healthcare.MAX_PROVIDER_ATTEMPTS)])
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                self._cache_path(temp_dir), \
+                patch.object(healthcare, "CACHE_TTL_SECONDS", 3600), \
+                patch.object(healthcare, "STALE_CACHE_TTL_SECONDS", 86400), \
+                self._mock_client(client), patch.object(healthcare.asyncio, "sleep", return_value=None):
+            key = healthcare._persistent_cache_key(23.78, 90.41, 1000, "hospital")
+            healthcare._cache_write_sync(key, [previous_facility], "2026-11-18T00:00:00Z")
+            with closing(sqlite3.connect(healthcare.CACHE_PATH)) as connection, connection:
+                connection.execute(
+                    "UPDATE nearby_osm_cache SET expires_at = ? WHERE cache_key = ?",
+                    (time.time() - 1, key),
+                )
+            response = await healthcare._fetch_elements(23.78, 90.41, 1000, "hospital")
+            persisted = healthcare._cache_read_sync(key)
+        self.assertEqual(response[:2], ([previous_facility], "stale"))
+        self.assertEqual(persisted[0], [previous_facility])
+
     async def test_concurrent_identical_lookups_share_persisted_result(self):
         client = FakeClient([FakeResponse({"elements": []})])
         with tempfile.TemporaryDirectory() as temp_dir, \
@@ -215,6 +243,24 @@ class HealthcareFinderTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as raised:
                 await healthcare.nearby_healthcare(23.78, 90.41, 1000, "all")
         self.assertEqual(raised.exception.status_code, 503)
+
+    async def test_local_database_failure_falls_back_to_provider(self):
+        facility = {
+            "type": "node", "id": 208, "lat": 23.78, "lon": 90.41,
+            "tags": {"amenity": "hospital", "name": "Provider Hospital"},
+        }
+        with patch.object(
+            healthcare.healthcare_store,
+            "search_local_facilities",
+            side_effect=sqlite3.OperationalError("database is unavailable"),
+        ), patch.object(
+            healthcare, "_fetch_elements",
+            return_value=([facility], "fresh", "overpass", "2026-11-18T00:00:00Z"),
+        ):
+            result = await healthcare.nearby_healthcare(23.78, 90.41, 1000, "hospital")
+        self.assertEqual([item["name"] for item in result["facilities"]], ["Provider Hospital"])
+        self.assertFalse(result["local_database_available"])
+        self.assertEqual(result["local_match_count"], 0)
 
     async def test_cache_persists_across_new_database_connections(self):
         with tempfile.TemporaryDirectory() as temp_dir, self._cache_path(temp_dir):

@@ -1,5 +1,6 @@
 """Tests for the persistent local OSM healthcare facility store."""
 
+import json
 import sqlite3
 import os
 import subprocess
@@ -8,8 +9,10 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
-from app.healthcare_store import import_facilities, initialize_database, search_local_facilities
+from app import healthcare_store
+from app.healthcare_store import database_status, import_facilities, initialize_database, search_local_facilities
 
 
 class HealthcareStoreTests(unittest.TestCase):
@@ -30,6 +33,46 @@ class HealthcareStoreTests(unittest.TestCase):
         self.assertIn("nearby_osm_cache", tables)
         self.assertIn("idx_healthcare_facilities_lat_lon", indexes)
         self.assertIn("idx_healthcare_facilities_category_lat_lon", indexes)
+
+    def test_empty_default_database_seeds_from_bundled_snapshot(self):
+        bundled_snapshot = Path(self.temp_dir.name) / "snapshot.json"
+        bundled_snapshot.write_text(json.dumps({
+            "dataset_source": "Fixture OSM extract",
+            "dataset_last_updated": "2026-11-18T00:00:00Z",
+            "attribution": "OpenStreetMap contributors",
+            "facilities": [{
+                "osm_type": "node", "osm_id": 101, "name": "Snapshot Clinic",
+                "category": "clinic", "lat": 23.78, "lon": 90.41, "address": "Dhaka",
+            }],
+        }), encoding="utf-8")
+        with patch.object(healthcare_store, "DB_PATH", self.db_path), \
+                patch.object(healthcare_store, "SNAPSHOT_PATH", bundled_snapshot):
+            initialize_database()
+            found, metadata = search_local_facilities(23.78, 90.41, 1000, "clinic")
+            status = database_status()
+        self.assertEqual([row["name"] for row in found], ["Snapshot Clinic"])
+        self.assertEqual(metadata["dataset_source"], "Fixture OSM extract")
+        self.assertEqual(status, {
+            "database_available": True, "initialized": True, "facility_count": 1,
+            "local_search_available": True,
+        })
+
+    def test_packaged_snapshot_contains_attributed_imported_osm_rows(self):
+        snapshot = json.loads(healthcare_store.SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(snapshot["dataset_source"], "OpenStreetMap Bangladesh extract")
+        self.assertEqual(len(snapshot["facilities"]), 7524)
+        self.assertIn("OpenStreetMap contributors", snapshot["attribution"])
+        self.assertEqual(
+            {row["category"] for row in snapshot["facilities"]},
+            {"hospital", "clinic", "pharmacy", "doctors"},
+        )
+
+    def test_database_diagnostics_report_unavailable_storage(self):
+        status = database_status(Path(self.temp_dir.name) / "missing.sqlite3")
+        self.assertEqual(status, {
+            "database_available": False, "initialized": False, "facility_count": 0,
+            "local_search_available": False,
+        })
 
     def test_import_and_search_filter_by_category_and_exact_radius(self):
         records = [
@@ -71,6 +114,7 @@ class HealthcareStoreTests(unittest.TestCase):
         import_facilities([record], dataset_source="test snapshot", db_path=self.db_path)
         environment = os.environ.copy()
         environment["CAREANYWHERE_HEALTHCARE_DB_PATH"] = str(self.db_path)
+        environment["CAREANYWHERE_HEALTHCARE_SNAPSHOT_PATH"] = str(Path(self.temp_dir.name) / "missing-snapshot.json")
         check = (
             "import sys; from app.healthcare_store import search_local_facilities; "
             "rows, meta = search_local_facilities(23.78, 90.41, 1000, 'clinic'); "

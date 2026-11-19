@@ -133,7 +133,11 @@
       'errors.healthcareReach': 'Could not reach an available map data service. Please try again later.',
       'errors.healthcareQuery': 'The map data service rejected the nearby search query.',
       'errors.healthcareRateMinute': 'Nearby searches are busy. Please wait a minute and try again.',
-      'errors.healthcareRateDay': 'Nearby search daily limit reached. Please try again later.'
+      'errors.healthcareRateDay': 'Nearby search daily limit reached. Please try again later.',
+      'errors.healthcareQueueBusy': 'Nearby healthcare search is busy. Please try again shortly.',
+      'errors.healthcareMaxDuration': 'Nearby healthcare search exceeded its time limit. Please try again later.',
+      'errors.healthcareDatabaseUnavailable': 'Local healthcare data and external map data providers are unavailable.',
+      'errors.healthcareLocalEmptyProviderFail': 'No local healthcare facilities matched this search, and external map data providers failed.'
     },
     bn: {
       'page.title': 'কেয়ারএনিহোয়্যার এআই — আপনার এআই চিকিৎসা সহকারী',
@@ -268,7 +272,11 @@
       'errors.healthcareReach': 'কোনো মানচিত্র ডেটা সেবায় সংযোগ করা যায়নি। পরে আবার চেষ্টা করুন।',
       'errors.healthcareQuery': 'মানচিত্র ডেটা সেবা অনুসন্ধানের অনুরোধ গ্রহণ করেনি।',
       'errors.healthcareRateMinute': 'অনেক অনুসন্ধান হচ্ছে। এক মিনিট অপেক্ষা করে আবার চেষ্টা করুন।',
-      'errors.healthcareRateDay': 'আজকের কাছাকাছি অনুসন্ধানের সীমা শেষ। পরে আবার চেষ্টা করুন।'
+      'errors.healthcareRateDay': 'আজকের কাছাকাছি অনুসন্ধানের সীমা শেষ। পরে আবার চেষ্টা করুন।',
+      'errors.healthcareQueueBusy': 'আশেপাশের স্বাস্থ্যসেবা অনুসন্ধান ব্যস্ত আছে। একটু পরে আবার চেষ্টা করুন।',
+      'errors.healthcareMaxDuration': 'আশেপাশের স্বাস্থ্যসেবা অনুসন্ধানে নির্ধারিত সময় শেষ হয়েছে। পরে আবার চেষ্টা করুন।',
+      'errors.healthcareDatabaseUnavailable': 'স্থানীয় স্বাস্থ্যসেবা তথ্য ও বাইরের মানচিত্র সেবা এখন পাওয়া যাচ্ছে না।',
+      'errors.healthcareLocalEmptyProviderFail': 'স্থানীয় তথ্যভান্ডারে এই অনুসন্ধানের কোনো ফল নেই এবং বাইরের মানচিত্র সেবাগুলো ব্যর্থ হয়েছে।'
     }
   };
 

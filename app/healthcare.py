@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import random
 import sqlite3
 import time
 from collections import deque
@@ -31,7 +32,22 @@ OVERPASS_URLS = tuple(dict.fromkeys((
     "https://overpass-api.de/api/interpreter",
 )))
 OVERPASS_USER_AGENT = "CareAnywhereAI/1.0 (Nearby Healthcare Finder)"
-HTTP_TIMEOUT_SECONDS = 9
+
+
+def _seconds_setting(name: str, default: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+        if not math.isfinite(value):
+            raise ValueError("non-finite value")
+        return min(max(value, 1.0), maximum)
+    except ValueError:
+        logger.warning("Invalid %s setting; using default=%s", name, default)
+        return default
+
+
+HTTP_CONNECT_TIMEOUT_SECONDS = _seconds_setting("CAREANYWHERE_OSM_CONNECT_TIMEOUT_SECONDS", 4.0, 30.0)
+HTTP_READ_TIMEOUT_SECONDS = _seconds_setting("CAREANYWHERE_OSM_READ_TIMEOUT_SECONDS", 9.0, 60.0)
+MAX_TOTAL_SEARCH_DURATION_SECONDS = _seconds_setting("CAREANYWHERE_OSM_MAX_SEARCH_SECONDS", 28.0, 120.0)
 OVERPASS_QUERY_TIMEOUT_SECONDS = 7
 MAX_PROVIDER_ATTEMPTS = len(OVERPASS_URLS)
 BACKOFF_BASE_SECONDS = 0.35
@@ -74,6 +90,7 @@ def _persistent_cache_key(lat: float, lon: float, radius: int, category: str) ->
 
 def _cache_read_sync(key: str) -> tuple[list[dict], str, str] | None:
     if CACHE_TTL_SECONDS == 0 or not CACHE_PATH.exists():
+        logger.info("nearby_cache event=miss reason=database_unavailable_or_disabled")
         return None
     try:
         with closing(sqlite3.connect(CACHE_PATH, timeout=2)) as connection, connection:
@@ -81,6 +98,7 @@ def _cache_read_sync(key: str) -> tuple[list[dict], str, str] | None:
                 "SELECT payload, expires_at, stale_until, fetched_at FROM nearby_osm_cache WHERE cache_key = ?", (key,)
             ).fetchone()
             if row is None:
+                logger.info("nearby_cache event=miss")
                 return None
             now = time.time()
             if row[2] <= now:
@@ -94,7 +112,9 @@ def _cache_read_sync(key: str) -> tuple[list[dict], str, str] | None:
             if not fetched_at:
                 fetched_at = datetime.fromtimestamp(row[1] - CACHE_TTL_SECONDS, timezone.utc).isoformat(timespec="seconds")
             if not isinstance(elements, list):
+                logger.warning("nearby_cache event=miss reason=invalid_payload")
                 return None
+            logger.info("nearby_cache event=hit freshness=%s", "fresh" if row[1] > now else "stale")
             return elements, "fresh" if row[1] > now else "stale", fetched_at
     except (sqlite3.Error, json.JSONDecodeError, OSError) as exc:
         logger.warning("Nearby OSM cache read failed: %s", type(exc).__name__)
@@ -185,7 +205,12 @@ def _build_query(lat: float, lon: float, radius: int, category: str) -> str:
 
 async def _request_provider(endpoint: str, query: str) -> tuple[list[dict], str]:
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS),
+        timeout=httpx.Timeout(
+            connect=HTTP_CONNECT_TIMEOUT_SECONDS,
+            read=HTTP_READ_TIMEOUT_SECONDS,
+            write=5.0,
+            pool=2.0,
+        ),
         headers={"User-Agent": OVERPASS_USER_AGENT},
     ) as client:
         response = await client.post(endpoint, data={"data": query})
@@ -207,17 +232,35 @@ async def _request_provider(endpoint: str, query: str) -> tuple[list[dict], str]
 
 async def _fetch_elements(lat: float, lon: float, radius: int, category: str) -> tuple[list[dict], str, str, str]:
     """Read persistent cache, otherwise make bounded, serialized provider attempts."""
+    started = time.monotonic()
+    deadline = started + MAX_TOTAL_SEARCH_DURATION_SECONDS
     key = _persistent_cache_key(lat, lon, radius, category)
     cached = await _read_cache(key)
     if cached is not None and cached[1] == "fresh":
+        logger.info("nearby_search event=cache_hit source=persistent_overpass_cache freshness=fresh")
         return cached[0], cached[1], "persistent_overpass_cache", cached[2]
 
     global _provider_cursor
-    async with _overpass_semaphore:
+    queue_timeout = max(0.0, deadline - time.monotonic())
+    if queue_timeout <= 0:
+        if cached is not None and cached[1] == "stale":
+            logger.warning("nearby_search event=stale_cache_fallback reason=search_deadline_exceeded")
+            return cached[0], "stale", "persistent_overpass_cache", cached[2]
+        raise HTTPException(503, "Nearby healthcare search exceeded its time limit. Please try again later.")
+    try:
+        await asyncio.wait_for(_overpass_semaphore.acquire(), timeout=queue_timeout)
+    except asyncio.TimeoutError as exc:
+        if cached is not None and cached[1] == "stale":
+            logger.warning("nearby_search event=stale_cache_fallback reason=upstream_queue_timeout")
+            return cached[0], "stale", "persistent_overpass_cache", cached[2]
+        raise HTTPException(503, "Nearby healthcare search is busy. Please try again shortly.") from exc
+
+    try:
         # A previous request for this query may have populated the cache while
         # this request waited on the single upstream slot.
         cached = await _read_cache(key)
         if cached is not None and cached[1] == "fresh":
+            logger.info("nearby_search event=cache_hit source=persistent_overpass_cache freshness=fresh")
             return cached[0], cached[1], "persistent_overpass_cache", cached[2]
         await _check_rate_limit()
 
@@ -229,24 +272,31 @@ async def _fetch_elements(lat: float, lon: float, radius: int, category: str) ->
         first_provider = _provider_cursor % len(OVERPASS_URLS)
         attempts = min(MAX_PROVIDER_ATTEMPTS, len(OVERPASS_URLS))
         for attempt in range(attempts):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                saw_timeout = True
+                break
             endpoint = OVERPASS_URLS[(first_provider + attempt) % len(OVERPASS_URLS)]
             provider = endpoint.split("/")[2]
             try:
-                elements, fetched_at = await _request_provider(endpoint, query)
+                elements, fetched_at = await asyncio.wait_for(
+                    _request_provider(endpoint, query), timeout=remaining
+                )
                 _provider_cursor = (first_provider + attempt + 1) % len(OVERPASS_URLS)
                 await _write_cache(key, elements, fetched_at)
+                logger.info("nearby_provider event=success provider=%s result_count=%s", provider, len(elements))
                 return elements, "fresh", "overpass", fetched_at
-            except httpx.TimeoutException as exc:
+            except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
                 saw_timeout, last_error = True, exc
-                logger.warning("Overpass provider %s timed out (attempt %s/%s)", provider, attempt + 1, MAX_PROVIDER_ATTEMPTS)
+                logger.warning("nearby_provider event=timeout provider=%s attempt=%s/%s", provider, attempt + 1, attempts)
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 code = exc.response.status_code
-                logger.warning("Overpass provider %s returned HTTP %s (attempt %s/%s)", provider, code, attempt + 1, MAX_PROVIDER_ATTEMPTS)
+                logger.warning("nearby_provider event=http_status provider=%s status=%s attempt=%s/%s", provider, code, attempt + 1, attempts)
                 if code == 429:
                     saw_rate_limit = True
                     saw_provider_busy = True
-                elif code in (502, 503, 504):
+                elif code in (500, 502, 503, 504):
                     saw_timeout = saw_timeout or code == 504
                     saw_provider_busy = True
                 elif 400 <= code < 500:
@@ -257,17 +307,22 @@ async def _fetch_elements(lat: float, lon: float, radius: int, category: str) ->
             except (httpx.RequestError, ValueError, TimeoutError) as exc:
                 last_error = exc
                 saw_timeout = saw_timeout or isinstance(exc, TimeoutError)
-                logger.warning("Overpass provider %s failed (attempt %s/%s): %s", provider, attempt + 1, MAX_PROVIDER_ATTEMPTS, type(exc).__name__)
+                event = "connection_error" if isinstance(exc, httpx.RequestError) else "invalid_response"
+                logger.warning("nearby_provider event=%s provider=%s error=%s attempt=%s/%s", event, provider, type(exc).__name__, attempt + 1, attempts)
 
             if attempt + 1 < attempts:
-                delay = min(BACKOFF_BASE_SECONDS * (2 ** attempt), BACKOFF_MAX_SECONDS)
-                await asyncio.sleep(delay)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    saw_timeout = True
+                    break
+                maximum_delay = min(BACKOFF_BASE_SECONDS * (2 ** attempt), BACKOFF_MAX_SECONDS)
+                await asyncio.sleep(min(random.uniform(0, maximum_delay), remaining))
 
         # Even if the whole provider set failed, the next user search begins
         # at the next host instead of repeatedly favoring the same one.
         _provider_cursor = (first_provider + 1) % len(OVERPASS_URLS)
         if cached is not None and cached[1] == "stale":
-            logger.warning("Serving stale nearby OSM cache after all providers failed")
+            logger.warning("nearby_search event=stale_cache_fallback reason=all_providers_failed")
             return cached[0], "stale", "persistent_overpass_cache", cached[2]
         if saw_timeout:
             raise HTTPException(
@@ -279,6 +334,8 @@ async def _fetch_elements(lat: float, lon: float, radius: int, category: str) ->
         if saw_provider_busy:
             raise HTTPException(503, "Nearby healthcare search is temporarily unavailable. Please try again later.") from last_error
         raise HTTPException(503, "Could not reach an available map data service. Please try again later.") from last_error
+    finally:
+        _overpass_semaphore.release()
 
 
 def _coordinates(element: dict) -> tuple[float, float] | None:
@@ -330,13 +387,24 @@ async def nearby_healthcare(
     category: Literal["hospital", "clinic", "pharmacy", "doctors", "all"] = "all",
 ):
     """Search imported local OSM facilities first, then cache and Overpass."""
-    local_facilities, local_metadata = await asyncio.to_thread(
-        healthcare_store.search_local_facilities,
-        lat,
-        lon,
-        radius,
-        category,
-        db_path=CACHE_PATH,
+    local_database_error = None
+    try:
+        local_facilities, local_metadata = await asyncio.to_thread(
+            healthcare_store.search_local_facilities,
+            lat,
+            lon,
+            radius,
+            category,
+            db_path=CACHE_PATH,
+        )
+    except (sqlite3.Error, OSError) as exc:
+        local_facilities, local_metadata = [], {}
+        local_database_error = exc
+        logger.error("nearby_local_database event=unavailable error=%s", type(exc).__name__)
+    logger.info(
+        "nearby_local_search event=complete result_count=%s database_available=%s",
+        len(local_facilities),
+        local_database_error is None,
     )
     if local_facilities:
         return {
@@ -349,9 +417,20 @@ async def nearby_healthcare(
             "is_stale": True,
             "stale": True,
             "last_updated": local_metadata.get("dataset_last_updated"),
+            "local_database_available": True,
+            "local_match_count": len(local_facilities),
         }
 
-    elements, freshness, source, last_updated = await _fetch_elements(lat, lon, radius, category)
+    try:
+        elements, freshness, source, last_updated = await _fetch_elements(lat, lon, radius, category)
+    except HTTPException as exc:
+        if exc.status_code == 503:
+            if local_database_error is not None:
+                detail = "Local healthcare database is unavailable and external map data providers failed."
+            else:
+                detail = "No local healthcare facilities matched this search, and external map data providers failed."
+            raise HTTPException(503, detail) from exc
+        raise
     facilities = []
     seen: set[tuple[str, int]] = set()
     for element in elements:
@@ -401,4 +480,6 @@ async def nearby_healthcare(
         "is_stale": is_stale,
         "stale": is_stale,
         "last_updated": last_updated,
+        "local_database_available": local_database_error is None,
+        "local_match_count": len(local_facilities),
     }

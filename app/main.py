@@ -11,6 +11,7 @@ from openai import OpenAI
 from uuid import uuid4
 from app.config import settings
 from app.agent import graph
+from app import healthcare_store
 from app.healthcare import router as healthcare_router
 
 ROOT=Path(__file__).resolve().parent.parent
@@ -66,7 +67,12 @@ def home():
 
 @app.get('/api/health')
 def health():
-    return {'status':'ok','configured':bool(settings.openai_api_key and settings.pinecone_api_key),'tavily':bool(settings.tavily_api_key)}
+    return {
+        'status':'ok',
+        'configured':bool(settings.openai_api_key and settings.pinecone_api_key),
+        'tavily':bool(settings.tavily_api_key),
+        'healthcare':healthcare_store.database_status(),
+    }
 
 
 

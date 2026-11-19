@@ -71,7 +71,11 @@ const knownApiErrors = new Map([
   ['Could not reach an available map data service. Please try again later.', 'errors.healthcareReach'],
   ['The map data service rejected the nearby search query.', 'errors.healthcareQuery'],
   ['Nearby searches are busy. Please wait a minute and try again.', 'errors.healthcareRateMinute'],
-  ['Nearby search daily limit reached. Please try again later.', 'errors.healthcareRateDay']
+  ['Nearby search daily limit reached. Please try again later.', 'errors.healthcareRateDay'],
+  ['Nearby healthcare search is busy. Please try again shortly.', 'errors.healthcareQueueBusy'],
+  ['Nearby healthcare search exceeded its time limit. Please try again later.', 'errors.healthcareMaxDuration'],
+  ['Local healthcare database is unavailable and external map data providers failed.', 'errors.healthcareDatabaseUnavailable'],
+  ['No local healthcare facilities matched this search, and external map data providers failed.', 'errors.healthcareLocalEmptyProviderFail']
 ]);
 
 function translatedError(message, fallbackKey = 'errors.requestFailed') {

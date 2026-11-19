@@ -1,5 +1,7 @@
 """SQLite storage and indexed local searches for OSM healthcare facilities."""
 
+import json
+import logging
 import math
 import os
 import sqlite3
@@ -13,6 +15,11 @@ DB_PATH = Path(os.getenv(
     os.getenv("CAREANYWHERE_OSM_CACHE_PATH", str(ROOT / "data" / "osm-healthcare-cache.sqlite3")),
 ))
 CATEGORIES = ("hospital", "clinic", "pharmacy", "doctors")
+SNAPSHOT_PATH = Path(os.getenv(
+    "CAREANYWHERE_HEALTHCARE_SNAPSHOT_PATH",
+    str(ROOT / "data" / "healthcare_snapshot.json"),
+))
+logger = logging.getLogger(__name__)
 CATEGORY_LABELS = {
     "hospital": "Hospital",
     "clinic": "Clinic",
@@ -31,7 +38,10 @@ def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
 
 def initialize_database(db_path: Path | str | None = None) -> None:
     """Create database tables and location/category indexes idempotently."""
-    with closing(_connect(db_path)) as connection, connection:
+    target_path = Path(db_path) if db_path is not None else DB_PATH
+    should_seed_snapshot = target_path.resolve() == DB_PATH.resolve()
+    seeded = False
+    with closing(_connect(target_path)) as connection, connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute(
             "CREATE TABLE IF NOT EXISTS healthcare_facilities ("
@@ -63,20 +73,46 @@ def initialize_database(db_path: Path | str | None = None) -> None:
         if "fetched_at" not in columns:
             connection.execute("ALTER TABLE nearby_osm_cache ADD COLUMN fetched_at TEXT NOT NULL DEFAULT ''")
 
+        count = connection.execute("SELECT COUNT(*) FROM healthcare_facilities").fetchone()[0]
+        if count == 0 and should_seed_snapshot and SNAPSHOT_PATH.is_file():
+            try:
+                snapshot = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+                facilities = snapshot.get("facilities") if isinstance(snapshot, dict) else None
+                if isinstance(facilities, list) and facilities:
+                    accepted = _validated_facility_rows(facilities)
+                    if accepted:
+                        connection.executemany(
+                            "INSERT OR REPLACE INTO healthcare_facilities "
+                            "(osm_type, osm_id, name, category, lat, lon, address) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            accepted,
+                        )
+                        metadata = (
+                            ("dataset_source", str(snapshot.get("dataset_source") or "OpenStreetMap healthcare snapshot")),
+                            ("dataset_last_updated", str(snapshot.get("dataset_last_updated") or "")),
+                            ("facility_count", str(len(accepted))),
+                            ("attribution", str(snapshot.get("attribution") or "")),
+                        )
+                        connection.executemany(
+                            "INSERT OR REPLACE INTO healthcare_metadata(key, value) VALUES (?, ?)", metadata
+                        )
+                        count = len(accepted)
+                        seeded = True
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                logger.warning("Bundled healthcare snapshot could not be loaded: %s", type(exc).__name__)
+    logger.info(
+        "Healthcare database initialized path=%s facility_count=%s snapshot_seeded=%s",
+        target_path,
+        count,
+        seeded,
+    )
 
-def import_facilities(
-    records: list[dict],
-    *,
-    dataset_source: str,
-    imported_at: str | None = None,
-    replace_existing: bool = True,
-    db_path: Path | str | None = None,
-) -> int:
-    """Atomically replace or merge OSM facility records and import metadata."""
-    initialize_database(db_path)
-    imported_at = imported_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+def _validated_facility_rows(records: list[dict]) -> list[tuple]:
+    """Validate an OSM snapshot before atomically inserting rows."""
     accepted = []
     for record in records:
+        if not isinstance(record, dict):
+            continue
         try:
             osm_type = str(record["osm_type"])
             osm_id = int(record["osm_id"])
@@ -89,14 +125,24 @@ def import_facilities(
         if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
             continue
         accepted.append((
-            osm_type,
-            osm_id,
-            str(record.get("name") or "").strip(),
-            category,
-            lat,
-            lon,
+            osm_type, osm_id, str(record.get("name") or "").strip(), category, lat, lon,
             str(record.get("address") or "").strip() or None,
         ))
+    return accepted
+
+
+def import_facilities(
+    records: list[dict],
+    *,
+    dataset_source: str,
+    imported_at: str | None = None,
+    replace_existing: bool = True,
+    db_path: Path | str | None = None,
+) -> int:
+    """Atomically replace or merge OSM facility records and import metadata."""
+    initialize_database(db_path)
+    imported_at = imported_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    accepted = _validated_facility_rows(records)
 
     with closing(_connect(db_path)) as connection, connection:
         if replace_existing:
@@ -171,6 +217,44 @@ def search_local_facilities(
     return facilities, metadata
 
 
+def database_status(db_path: Path | str | None = None) -> dict:
+    """Return a safe, non-secret database diagnostic for health endpoints."""
+    path = Path(db_path) if db_path is not None else DB_PATH
+    try:
+        if not path.is_file():
+            return {
+                "database_available": False,
+                "initialized": False,
+                "facility_count": 0,
+                "local_search_available": False,
+            }
+        with closing(sqlite3.connect(path, timeout=2)) as connection:
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+            initialized = {"healthcare_facilities", "healthcare_metadata"}.issubset(tables)
+            count = connection.execute("SELECT COUNT(*) FROM healthcare_facilities").fetchone()[0] if initialized else 0
+        return {
+            "database_available": True,
+            "initialized": initialized,
+            "facility_count": count,
+            "local_search_available": initialized,
+        }
+    except (OSError, sqlite3.Error) as exc:
+        logger.warning("Healthcare database diagnostic failed: %s", type(exc).__name__)
+        return {
+            "database_available": False,
+            "initialized": False,
+            "facility_count": 0,
+            "local_search_available": False,
+        }
+
+
 # Ensure the local store exists as soon as the application imports this module,
-# before any Overpass request can occur (including when no extract has been imported).
-initialize_database()
+# before any Overpass request can occur. If storage is temporarily unavailable,
+# keep the API alive so its health endpoint can report the database problem and
+# nearby search can still attempt public providers.
+try:
+    initialize_database()
+except (OSError, sqlite3.Error) as exc:
+    logger.exception("Healthcare database initialization failed error=%s", type(exc).__name__)
